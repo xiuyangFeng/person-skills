@@ -4,7 +4,7 @@
 
 通过在这个仓库中整理 Skills，我可以在不同的 Antigravity 工作区中快速复用和共享这些自定义技能。
 
-## 目录结构
+## 目录结构与现有技能
 
 本仓库遵循 Antigravity 默认的 Customizations (技能自定义) 格式进行组织：
 
@@ -12,13 +12,15 @@
 person-skills/
 ├── README.md                  # 本说明文件
 └── skills/                    # 自定义技能目录
-    └── template-skill/        # 示例/模版技能
-        ├── SKILL.md           # 必须：技能说明与指令文件
-        ├── scripts/           # 可选：辅助脚本与工具
-        ├── examples/          # 可选：参考实现与用法示例
-        ├── resources/         # 可选：技能所需的静态资源
-        └── references/        # 可选：参考资料或长文本
+    ├── template-skill/        # 示例/模版技能
+    └── lab-docs-engineering/  # 包含科研实验文档工程化技能
 ```
+
+### 技能列表
+
+- **[template-skill](file:///Users/xiuyang/Documents/antigravity/wonderful-tesla/skills/template-skill/SKILL.md)**: 技能创建的基准模版。
+- **[lab-docs-engineering](file:///Users/xiuyang/Documents/antigravity/wonderful-tesla/skills/lab-docs-engineering/SKILL.md)**: 用于科研实验的文档工程化管理技能。支持实验推进记录追加、正式实验入账、知识库分层整理与阶段收尾归档等功能。
+
 
 ## 如何添加新的 Skill
 
