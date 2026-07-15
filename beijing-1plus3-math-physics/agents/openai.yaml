@@ -1,0 +1,4 @@
+interface:
+  display_name: "北京1+3数理出题"
+  short_description: "为北京初二1+3制作数学物理面试题与教师学生双版本讲义"
+  default_prompt: "Use $beijing-1plus3-math-physics to create Beijing Grade 8 1+3 math or physics interview practice."
