@@ -21,7 +21,7 @@ person-skills/
 ### 技能列表
 
 - **[template-skill](file:///Users/xiuyang/Documents/antigravity/wonderful-tesla/skills/template-skill/SKILL.md)**: 技能创建的基准模版。
-- **[lab-docs-engineering](file:///Users/xiuyang/Documents/antigravity/wonderful-tesla/skills/lab-docs-engineering/SKILL.md)**: 用于科研实验的文档工程化管理技能。支持实验推进记录追加、正式实验入账、知识库分层整理与阶段收尾归档等功能。
+- **[lab-docs-engineering](skills/lab-docs-engineering/SKILL.md)**（v3，2026-10）: 科研实验的文档工程化技能：推进记录、正式入账、知识库分层整理、收尾归档与滚动切卷；v3 新增多 AI 会话并行协议（开工检查 / 跨线影响告知 / 收尾同步）与全量同步审计（先拿事实再改文档），保证几个会话同时干活时文档仍然统一。可装到 Cursor 或 Claude Code，见其 [README](skills/lab-docs-engineering/README.md)。
 
 ### Claude Code 插件
 

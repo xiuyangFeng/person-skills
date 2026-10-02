@@ -13,7 +13,7 @@
 仓库已有 docs / 文档结构？
 ├─ 有，且有推进记录/规范目录  → A 自动推断（默认，最省事）
 ├─ 没有，或几乎空仓库          → B 从零 scaffold（先建最小骨架，再生成 profile）
-└─ 用户要逐项手填 / 结构很特殊 → C 完整问卷（Q1–Q10）
+└─ 用户要逐项手填 / 结构很特殊 → C 完整问卷（Q1–Q13）
 ```
 
 三种模式最终都产出同一份 profile（YAML 结构见文末）。**关键原则**：能从仓库探测到的就别问用户；只把探测不到、或有歧义的项抛给用户确认。
@@ -37,6 +37,12 @@
 | `archive.roots` | 找已存在的 `**/_archive/`、`**/archive/`、`**/历史/` |
 | `analysis_boundary.skill_name` | 扫 `.cursor/skills/` 是否有分析/复盘类 skill；有则填其名 |
 | `style.language` | 看现有 md 主语言 |
+| `live_docs` | 入口 README、各块 / 路线 README、名字含「跟踪 / tracking / status / 待办 / todo / 总纲 / roadmap」的 md、`norms_dir` 下的操作说明 |
+| `snapshot_patterns` | 文件名带日期的报告 / 汇报（`*_YYYY-MM-DD*.md`）、`汇报材料 / reports / slides` 目录、`历史卷 / *卷.md`、`_archive/**` |
+| `block_layout` | 看各块目录是否已是「README + 一份跟踪 + 报告」；是则填 `readme+tracking+latest_report` |
+| `fact_registry`（草稿） | 在 `live_docs` 里 grep 反复出现的标识（数据版本名、模型 / 发布包名、底座名、作业号前缀、服务端口），出现在 ≥3 份文件的就是跨文档事实；规范位置取最贴近事实的块 README / 跟踪 |
+| `shared_resources` | 文档里提到的专用节点、预留 GPU、共享缓存目录、冻结代码副本、服务端口；以及负责它们的线 |
+| `style.md_constraints` | 仓库里有无渲染器限制的说明（如不支持 HTML 注释 / 引用式链接）；有就照抄 |
 
 探测手段：`find`/`glob` 目录树 + `grep` 文件名关键词；**不要**通读大文件，命中文件名/路径即可。
 
@@ -46,6 +52,8 @@
 2. 是否**禁止跨路线混表指标**（默认是）。
 3. 正式入账：无 / 仅 Markdown / 有 CSV index / 有 xlsx（探测值对不对）。
 4. 成功标准一句话（探测不到，必问；给默认见 Q10）。
+5. 跨文档事实登记表草稿：「这几条事实的规范位置对吗？还有哪些事实经常在多份文档里重复？」
+6. 是否常有多个 AI 会话并行（决定是否在入口写明开工检查 / 收尾同步的约定）。
 
 **第 3 步：落盘 profile**，再用 ≤5 行确认：文档根 / 日志路由数 / 入账模式 / 归档是否需口头确认 / 成功标准。之后即可继续用户原本的业务动作。
 
@@ -76,7 +84,7 @@ docs/
 
 ---
 
-## 模式 C · 完整问卷（Q1–Q10）
+## 模式 C · 完整问卷（Q1–Q13）
 
 一次抛出下列问题（可编号作答）。已有合理默认值的项给出默认并允许「沿用」。答完后**直接写入** profile；重新配置时先摘要 diff。
 
@@ -101,6 +109,12 @@ docs/
 **Q9. 语言与标题** 文档语言（默认中文）；推进记录标题格式（默认 `## YYYY-MM-DD｜主题 · 动作 · 状态`）；必填字段勾选（工程四件套 + 科研可选）→ `style`, `required_fields`
 
 **Q10. 成功标准（一句话）** 例：新人 10 分钟找到当前主线与最新结论；结案归档不丢 Go/No-Go。默认即此句 → `success_criteria`
+
+**Q11. 活文档与快照** 哪些文档要始终保持现状（入口、块 README、跟踪、待办、总纲）？哪些是快照（带日期报告、汇报、历史卷）？→ `live_docs`, `snapshot_patterns`
+
+**Q12. 跨文档事实** 哪些事实会在多份文档重复（数据版本、底座、部署模型、运行中作业……）？各自以哪份文档为准？→ `fact_registry`
+
+**Q13. 共享资源与并行** 有哪些共享资源（专用节点、共享缓存、冻结副本、服务）？是否常有多个 AI 会话并行？块内是否只留 README + 一份跟踪 + 最新报告？→ `shared_resources`, `parallel_sessions`, `block_layout`
 
 ---
 
@@ -176,6 +190,30 @@ doc_layers:
     paths: []
   - layer: "路线状态"
     paths: []
+
+# —— v3 新增：多会话一致性 ——
+live_docs:            # 始终保持现状的文档（全量同步审计改这些）
+  - "docs/README.md"
+snapshot_patterns:    # 快照：正文不改，只在其后补记
+  - "docs/**/_archive/**"
+  - "docs/**/*_20??-??-??*.md"
+block_layout: ""      # 例："readme+tracking+latest_report"（块内只留 README + 一份跟踪 + 最新报告）
+parallel_sessions: true
+fact_registry_doc: ""  # 可选：登记表放在仓库文档里时填其路径与小节（profile 不进 git 时推荐），此时下面的内联列表留空
+shared_resources_doc: ""
+fact_registry:        # 跨文档事实：唯一规范位置 + 镜像 + 核实方式
+  - fact: ""
+    canonical: ""
+    mirrors: []
+    verify: ""
+shared_resources:     # 共享资源与负责的线；占用 / 依赖时要在受影响处留告知
+  - name: ""
+    owner: ""
+    notice_at: ""
+style_extra:
+  md_constraints: []  # 例：["不用 HTML 注释", "不用引用式链接定义"]
+  timezone_note: ""   # 例："服务器显示美西时间，文档统一写北京时间"
+  delivery: ""        # 例："只改 Markdown，不发网页"
 ```
 ````
 

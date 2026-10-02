@@ -65,4 +65,20 @@ doc_layers:
     paths: ["docs/02-推进与变更/代码修改与实验推进记录.md"]
   - layer: "路线状态"
     paths: ["docs/README.md"]
+
+# —— v3：多会话一致性（单人单会话也建议填，成本很低） ——
+live_docs: ["docs/README.md"]
+snapshot_patterns: ["docs/**/_archive/**", "docs/**/*_20??-??-??*.md"]
+block_layout: ""            # 实验分叉成多块后可设 "readme+tracking+latest_report"
+parallel_sessions: false    # 常同时开多个 AI 会话时改 true
+fact_registry:
+  - fact: "当前最佳模型与指标"
+    canonical: "docs/README.md#现在先看什么"
+    mirrors: []
+    verify: "outputs/<最佳 run>/summary.json"
+shared_resources: []
+style_extra:
+  md_constraints: []
+  timezone_note: ""
+  delivery: ""
 ```
