@@ -8,7 +8,7 @@ DIR=$(cd "$(dirname "$0")" && pwd)
 LIVE=${1:-}
 NOW=$(claude --version 2>/dev/null | awk '{print $1}')
 TESTED=$(cat "$DIR/TESTED_WITH" 2>/dev/null || echo 未知)
-echo "Claude Code $NOW（上次验证通过：$TESTED）"
+echo "Claude Code ${NOW}（上次验证通过：${TESTED}）"
 [ "$NOW" != "$TESTED" ] && echo "  版本变了：function hooks 接口还是 early access，下面的检查决定能不能继续用"
 fail=0
 step() { local name=$1; shift; local out; if out=$("$@" 2>&1); then echo "✔ $name"; else echo "✘ $name"; echo "$out" | tail -25 | sed 's/^/    /'; fail=1; fi; }
