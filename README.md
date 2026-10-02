@@ -11,9 +11,11 @@
 ```
 person-skills/
 ├── README.md                  # 本说明文件
-└── skills/                    # 自定义技能目录
-    ├── template-skill/        # 示例/模版技能
-    └── lab-docs-engineering/  # 包含科研实验文档工程化技能
+├── skills/                    # 自定义技能目录
+│   ├── template-skill/        # 示例/模版技能
+│   └── lab-docs-engineering/  # 包含科研实验文档工程化技能
+└── claude-code-plugins/       # Claude Code 插件（function hooks，不是 SKILL.md 技能）
+    └── context-meter/         # 提示框上方的会话仪表
 ```
 
 ### 技能列表
@@ -21,6 +23,9 @@ person-skills/
 - **[template-skill](file:///Users/xiuyang/Documents/antigravity/wonderful-tesla/skills/template-skill/SKILL.md)**: 技能创建的基准模版。
 - **[lab-docs-engineering](file:///Users/xiuyang/Documents/antigravity/wonderful-tesla/skills/lab-docs-engineering/SKILL.md)**: 用于科研实验的文档工程化管理技能。支持实验推进记录追加、正式实验入账、知识库分层整理与阶段收尾归档等功能。
 
+### Claude Code 插件
+
+- **[context-meter](claude-code-plugins/context-meter/README.md)**: Claude Code 提示框上方的会话仪表：上下文占用与自动压缩阈值、缓存命中率、5h / 7d 额度与重置倒计时、子代理 / 后台任务数，逐次模型请求实时刷新；空闲时一行、生成中三行，可在 `/config` 里调布局与动画。
 
 ## 如何添加新的 Skill
 
@@ -74,3 +79,13 @@ description: 用于描述该技能做什么以及什么时候触发的简短描�
 
 智能体会自动克隆/下载仓库文件，并将对应的技能文件夹提取至合适的位置（如当前工作区的 `.agents/skills/template-skill`），实现一键安装。
 
+## 如何安装 Claude Code 插件（context-meter）
+
+context-meter 用的是 Claude Code 的 function hooks 插件接口（early access，Claude Code 升级后可能需要跟着改）。放进 `~/.claude/skills/` 下的插件每次启动会话都会自动加载：
+
+```bash
+git clone https://github.com/xiuyangFeng/person-skills.git ~/person-skills
+ln -s ~/person-skills/claude-code-plugins/context-meter ~/.claude/skills/context-meter   # 或 cp -r 一份
+```
+
+重开 Claude Code 即可看到；升级 Claude Code 后在插件目录跑 `./selfcheck.sh --live` 确认还能用。详见 [插件 README](claude-code-plugins/context-meter/README.md)。

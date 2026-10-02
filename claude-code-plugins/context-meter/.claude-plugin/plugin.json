@@ -1,0 +1,45 @@
+{
+  "name": "context-meter",
+  "version": "0.3.0",
+  "description": "提示框上方的会话仪表：上下文占用与压缩、缓存命中、额度与重置倒计时、子代理，逐次请求实时刷新",
+  "author": {
+    "name": "cy"
+  },
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "layout": {
+      "type": "string",
+      "title": "仪表布局",
+      "description": "auto：空闲时一行、生成中三行；full：始终三行；compact：始终一行",
+      "default": "auto",
+      "options": [
+        "auto",
+        "full",
+        "compact"
+      ]
+    },
+    "animation": {
+      "type": "boolean",
+      "title": "动画",
+      "description": "转圈、流光与数值缓动；/config 里开了减少动画时自动关闭",
+      "default": true
+    },
+    "trend": {
+      "type": "string",
+      "title": "走势长度",
+      "description": "迷你走势显示最近多少轮，off 不显示",
+      "default": "24",
+      "options": [
+        "24",
+        "12",
+        "off"
+      ]
+    },
+    "alerts": {
+      "type": "boolean",
+      "title": "阈值提醒",
+      "description": "上下文 70% / 85%、额度 90% / 95% 与发生压缩时弹出提示",
+      "default": true
+    }
+  }
+}
