@@ -70,6 +70,39 @@ export type Agents = {
   items: { id: string; label: string; type: string }[]
 }
 
+/** 侧栏里的一个子代理：引擎的列表信息 + 本插件从钩子里记下的活动。 */
+export type AgentActivity = {
+  id: string
+  label: string
+  type: string
+  /** running / completed / failed / killed … */
+  status: string
+  parentId: string | null
+  /** 颜色序号（波浪与标签用） */
+  hue: number
+  startedAt: number
+  endedAt: number | null
+  tools: number
+  tokens: number
+  /** 正在跑的工具名（不记参数）；没有为 null */
+  currentTool: string | null
+  lastActivity: number
+}
+
+/** 工具时间线上的一次调用：只记工具名、属于谁、起止与成败，不记参数。 */
+export type ToolEvent = {
+  seq: number
+  tool: string
+  /** 子代理 id；主对话为 null */
+  owner: string | null
+  startedAt: number
+  endedAt: number | null
+  isError: boolean
+}
+
+/** 侧栏开合：dismissed 是收起时已有的子代理，它们不会再把侧栏弹出来。 */
+export type Panel = { isOpen: boolean; dismissed: string[]; allDoneAt: number | null }
+
 /** 已提醒过的阈值：key（ctx 或额度种类）→ 已越过的最高档。 */
 export type Alerts = Record<string, number>
 
@@ -114,6 +147,10 @@ declare module 'claude-code' {
       burn: Burn | null
       lastCompact: LastCompact | null
       agents: Agents | null
+      fleet: AgentActivity[] | null
+      toolLog: ToolEvent[] | null
+      toolCounts: Record<string, number> | null
+      panel: Panel | null
       alerts: Alerts | null
       /** 每分钟 +1，驱动重置倒计时重绘 */
       minute: number

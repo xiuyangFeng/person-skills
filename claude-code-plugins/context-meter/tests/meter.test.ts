@@ -256,3 +256,104 @@ test('band yields to a survey', async ($, on) => {
   expect(await ui.find({ type: 'Text', text: /engine band/ })).toBeDefined()
   await ui.unmount()
 })
+
+// ── 子代理侧栏 ─────────────────────────────────────────────────
+const PANE = {
+  component: 'Pane',
+  requestId: 'context-meter-agents',
+  props: {
+    title: '⚙ 子代理',
+    isFocused: false,
+    bodyColumns: 44,
+    placement: 'dock',
+    scroll: { offset: 0, bodyRows: 39 },
+    view: {},
+  },
+  viewport: { columns: 200, rows: 40, isFullscreen: true },
+} as const
+
+type AgentRow = { id: string; description: string; type: string; status: string }
+
+const agentsWorld = (on: On, list: AgentRow[], opened: string[], closed: string[]) => {
+  on('agent.list', () => ({ value: list as never }))
+  on('ui.open', ($, e) => {
+    opened.push(e.id)
+    return { value: { isPlaced: true } as never }
+  })
+  on('ui.close', ($, e) => {
+    closed.push(e.id)
+    return { value: undefined } as never
+  })
+  on('tool.call', () => ({ result: null, text: 'ok' }) as never)
+}
+
+test('calling a subagent opens the side panel: a wave per running agent, no tool arguments', async ($, on) => {
+  engine(on)
+  const opened: string[] = []
+  const closed: string[] = []
+  const list: AgentRow[] = [{ id: 'a1', description: '核对训练日志', type: 'Explore', status: 'running' }]
+  agentsWorld(on, list, opened, closed)
+
+  await $.tool.call({ tool: 'Agent', description: 'secret-desc', prompt: 'secret-prompt', subagent_type: 'Explore' } as never)
+  expect(opened).toEqual(['context-meter-agents'])
+  await $.tool.call({ tool: 'Grep', pattern: 'secret-pattern', path: '/secret/path', agentId: 'a1' } as never)
+
+  const ui = await $.ui.mount({ plugin: 'context-meter', surface: 'terminal', ...PANE })
+  expect(await ui.find({ type: 'Text', text: /^1 运行$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^Explore$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /核对训练日志/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /🔧 1 · / })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^[▁▂▃▄▅▆▇█]+$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^Grep\s*$/ })).toBeDefined()
+  // 工具参数、命令、路径一律不出现
+  expect(await ui.find({ type: 'Text', text: /secret/ })).toBeUndefined()
+
+  // 收起：关面板；已有的子代理不会再把它弹出来
+  await ui.press({ key: 'collapse' })
+  expect(closed).toEqual(['context-meter-agents'])
+  await ui.unmount()
+  await $.tool.call({ tool: 'Read', file_path: '/x', agentId: 'a1' } as never)
+  expect(opened.length).toBe(1)
+
+  // 新的子代理出现：再弹出来
+  list.push({ id: 'a2', description: '回填工作簿', type: 'general-purpose', status: 'running' })
+  await $.tool.call({ tool: 'Read', file_path: '/y', agentId: 'a2' } as never)
+  expect(opened.length).toBe(2)
+
+  // a1 结束：变成一行 ✓
+  list[0]!.status = 'completed'
+  await $.turn.complete({ answer: '', durationMs: 1000, isAborted: false, turnId: 'x', reason: 'answer', agentId: 'a1' } as never)
+  const after = await $.ui.mount({ plugin: 'context-meter', surface: 'terminal', ...PANE })
+  expect(await after.find({ type: 'Text', text: /^1 运行$/ })).toBeDefined()
+  expect(await after.find({ type: 'Text', text: /^ · 1 完成$/ })).toBeDefined()
+  expect(await after.find({ type: 'Text', text: /^Explore · 核对训练日志$/ })).toBeDefined()
+  await after.unmount()
+})
+
+test('inline placement shows one line per running agent', async ($, on) => {
+  engine(on)
+  agentsWorld(on, [{ id: 'a1', description: '核对训练日志', type: 'Explore', status: 'running' }], [], [])
+  await $.tool.call({ tool: 'Read', file_path: '/x', agentId: 'a1' } as never)
+  const ui = await $.ui.mount({
+    plugin: 'context-meter',
+    surface: 'terminal',
+    ...PANE,
+    props: { ...PANE.props, placement: 'inline', bodyColumns: 100 },
+  })
+  expect(await ui.find({ type: 'Text', text: /^Explore$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /🔧 1$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /核对训练日志/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('manual mode opens only from the ⚙ button in the band', { options: { agentPanel: 'manual' } }, async ($, on) => {
+  engine(on)
+  const opened: string[] = []
+  agentsWorld(on, [{ id: 'a1', description: '核对训练日志', type: 'Explore', status: 'running' }], opened, [])
+  await $.tool.call({ tool: 'Agent', description: 'd', prompt: 'p', subagent_type: 'Explore' } as never)
+  expect(opened).toEqual([])
+  const band = await $.ui.mount({ plugin: 'context-meter', surface: 'terminal', ...BAND })
+  await band.press({ key: 'agents' })
+  expect(opened).toEqual(['context-meter-agents'])
+  await band.unmount()
+})

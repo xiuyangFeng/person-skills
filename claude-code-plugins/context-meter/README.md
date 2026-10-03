@@ -1,6 +1,6 @@
 # context-meter
 
-Claude Code 提示框上方的会话仪表（function hooks 插件，early access 接口）。
+Claude Code 提示框上方的会话仪表 + 子代理侧栏（function hooks 插件，early access 接口）。
 
 安装：
 
@@ -38,6 +38,40 @@ ln -s ~/person-skills/claude-code-plugins/context-meter ~/.claude/skills/context
 | ◔ 5h 23% ↻3h | 额度窗口：饼图标 + 用量 + 距重置 |
 | Σ | 本会话累计 token（主对话；子代理另计，见 ▾ 明细） |
 | ▾ | 展开明细：每轮额度消耗与预计还能用几轮、上次压缩、后台任务列表、/context 分类 |
+| ⚙ n（可点） | 运行中的子代理数；点一下打开 / 收起子代理侧栏 |
+
+## 子代理侧栏
+
+主对话一调用子代理就从右侧滑出（全屏界面停靠在对话旁边；经典界面下显示在提示框上方，一行一个子代理）：
+
+```
+│2 运行 · 1 完成                                   收起 ×
+│────────────────────────────────────────────────────────
+│✢ Explore                                           2:00
+│  核对训练日志
+│  ▁          ▁▃▄▄▃▃▂▁        ▁▂▃▃▁             ▁▁
+│  ██▇▄▃▂▃▃▃▄▆█████████▅▄▅▆▇███████▆▄▄▃▂▁▁▂▅▇██████▆▄▄▄▅
+│  🔧 14 · 31k · ▸ Grep
+│
+│✻ general-purpose                                   1:16
+│  回填工作簿
+│  ▂▂▁▁▁▂▂▂▂▃▃▃▂▂▁▁▁▁▁▁▁▁▂▂▃▃▃▃▂▂▂▁▁▁▂▂▂▃▃▃▄▃▃▂▂▁▁▁▁▁▁▁
+│  🔧 9 · 18k · 静默 32s
+│
+│✓ Explore · 搜索配置文件                       0:31 · 🔧6
+│── 工具 ──────────────────────────────────────────────────
+│✻ Grep     Explore                                   19s
+│✓ Read     general-purpose                          0.1s
+│✗ Edit     主对话                                    失败
+│Read 34 · Bash 12 · Grep 9 · Edit 7
+```
+
+- 每个运行中的子代理一条两行高的流动波浪，各用一种颜色。刚调过工具时波高、带细碎涟漪；越久没动静越低越平，卡住的一眼能看出来（右下标「静默 32s」）。
+- 下面一行：工具次数 · token · 正在跑的工具名（没有工具在跑时是「思考中」）。
+- 已结束的折成一行 ✓ / ✗；子代理再开的子代理缩进挂在父下面。
+- 工具时间线只显示工具名、属于谁、耗时、成败，**不显示参数、命令和路径**。
+- 收起：右上角「收起」/ 关闭标记 / 仪表上的 ⚙ / `/agent-panel`。收起时已有的子代理不会再把它弹出来，新调用的子代理会。
+- `auto` 模式下全部完成 1 分钟后自动收起。
 
 提醒（toast）：上下文越过 70% / 85%、额度越过 90% / 95%、发生压缩时各提醒一次；回落 10 个点以上重新武装。
 
@@ -49,6 +83,7 @@ ln -s ~/person-skills/claude-code-plugins/context-meter ~/.claude/skills/context
 | 动画 `animation` | 转圈、流光、数值缓动；/config 开了减少动画时自动关 | 开 |
 | 走势长度 `trend` | `24` / `12` / `off` | `24` |
 | 阈值提醒 `alerts` | 上面那些 toast | 开 |
+| 子代理侧栏 `agentPanel` | `auto` 调用时弹出、全部完成 1 分钟后收起 · `sticky` 弹出后一直留着 · `manual` 只在点 ⚙ 或 `/agent-panel` 时打开 | `auto` |
 
 ## 数据从哪来
 
@@ -56,7 +91,7 @@ ln -s ~/person-skills/claude-code-plugins/context-meter ~/.claude/skills/context
 - 每轮结束（`turn.complete`）：轮数、上一轮耗时 / 工具数 / 命中率、每轮额度消耗（轮前轮后差的指数平滑）。
 - `session.measure`：每轮一次，额度跳动时也会推；走势里的上下文点从这里来。
 - `session.compact`：压缩前后大小，立即把占用换成压缩后的值。
-- 后台任务：`$.agent.list()`，有任务在跑时约 2 秒查一次。
+- 子代理：`$.agent.list()` 给类型、描述、状态、父子关系，有子代理在跑时约每秒查一次；子代理的工具调用（`tool.call` 带 `agentId`）给工具次数、正在跑的工具名、最后活动时刻；它的模型请求（`turn.step`）给 token。侧栏开合状态与"已收起"的子代理只在本会话内记。
 - 新会话 / 刚 `--resume` 还没有响应时：用 `/context` 口径本地估算占用（不发请求）。
 - 跨重启：每轮结束按会话 id 存快照到 `$.store`（保留最近 40 个会话），`--resume` 时读回累计、走势、上一轮、每轮消耗、上次压缩。
 
@@ -77,7 +112,7 @@ TESTED_WITH                  上次自检通过的 Claude Code 版本
 - 放在（或软链到）`~/.claude/skills/context-meter/`，每个会话启动时自动加载；交互会话监视这个目录，保存即重载。
 - **不要**用 `~/.claude/settings.json` 的 `env.CLAUDE_CODE_PLUGIN_DIRS`：那个文件会被重写（旧会话退出时写回缓存副本、orca 装 hooks），那一行会丢。
 - 改代码最好先在别处的副本里改完、测完再整体拷回来，避免改到一半被正在用的会话重载。
-- 看实际效果：`CONTEXT_METER_DEMO=1 claude`（静止示例）或 `CONTEXT_METER_DEMO=working claude`（生成中示例），只填示例数据，不发请求。
+- 看实际效果：`CONTEXT_METER_DEMO=1 claude`（静止示例）、`CONTEXT_METER_DEMO=working claude`（生成中示例）、`CONTEXT_METER_DEMO=agents claude`（子代理侧栏示例，终端宽 ≥144 列才会自动停靠），只填示例数据，不发请求。
 - Claude Code 升级后跑 `./selfcheck.sh`（加 `--live` 会另起一个会话截屏确认）。
 - 停用：把目录移出 `~/.claude/skills/`，重开会话。
 
@@ -89,8 +124,14 @@ TESTED_WITH                  上次自检通过的 Claude Code 版本
 - 流式事件（`turn.step`）的钩子必须是 `async function*`，`yield* next(e)` 拿结果。
 - 测试里 `on` 注册的是"引擎底部"：用到的事件都要给替身；op（`session.usage`、`store.get`、`clock.now`…）的替身返回 `{ value }`。
 - 压缩事件的 `messages` 不能为空。
+- 面板（Pane）只有全屏界面才停靠在旁边；经典界面下 `placement` 是 `inline`，要准备一个矮的版本。没人要求时自动打开（计时器、钩子里）要终端 ≥144 列才落座。
+- 面板右上角是引擎自己的关闭标记，自己的按钮要留出两格。
+- 波浪只调振幅、不调速度：速度跟着活跃度变会让相位每帧跳一下。
+- 全屏渲染器启动被打断（比如测试时直接杀掉 tmux）后，下一次启动会退回经典界面一次。
 
 ## 变更记录
+
+- 0.4.0（2026-10-03）：子代理侧栏（调用时自动弹出、可收起、全部完成 1 分钟后自动收起；两行流动波浪表示活跃度；工具时间线不含参数）；仪表上的 ⚙ 可点开侧栏；`/agent-panel` 命令；`agentPanel` 选项；`CONTEXT_METER_DEMO=agents` 示例。
 
 - 0.3.0（2026-10-02）：空闲一行 / 生成中三行；额度重置倒计时与每轮消耗；压缩提示与走势标记；阈值提醒；子代理 / 后台任务数；重启后恢复；未响应前估算占用；/config 选项（布局、动画、走势、提醒）与减少动画；无界面运行不起计时器；README、自检脚本、git。
 - 0.2（2026-10-02）：逐次请求实时刷新（`turn.step`）；全局放到 `~/.claude/skills/`。

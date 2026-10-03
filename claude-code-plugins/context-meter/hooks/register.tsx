@@ -10,7 +10,7 @@ import type {
   TurnUsage,
 } from 'claude-code'
 
-import type { Alerts, Breakdown, Burn, History, Limit, Meter, Snapshot, Totals } from '../types'
+import type { AgentActivity, Alerts, Breakdown, Burn, History, Limit, Meter, Snapshot, ToolEvent, Totals } from '../types'
 
 const meter = atom({ plugin: 'context-meter', key: 'meter' } as const, null)
 const totals = atom({ plugin: 'context-meter', key: 'totals' } as const, null)
@@ -21,6 +21,10 @@ const history = atom({ plugin: 'context-meter', key: 'history' } as const, null)
 const burn = atom({ plugin: 'context-meter', key: 'burn' } as const, null)
 const lastCompact = atom({ plugin: 'context-meter', key: 'lastCompact' } as const, null)
 const agents = atom({ plugin: 'context-meter', key: 'agents' } as const, null)
+const fleet = atom({ plugin: 'context-meter', key: 'fleet' } as const, null)
+const toolLog = atom({ plugin: 'context-meter', key: 'toolLog' } as const, null)
+const toolCounts = atom({ plugin: 'context-meter', key: 'toolCounts' } as const, null)
+const panel = atom({ plugin: 'context-meter', key: 'panel' } as const, null)
 const alerts = atom({ plugin: 'context-meter', key: 'alerts' } as const, null)
 const minute = atom({ plugin: 'context-meter', key: 'minute' } as const, 0)
 const isExpanded = atom({ plugin: 'context-meter', key: 'isExpanded' } as const, false)
@@ -43,6 +47,10 @@ type Palette = {
   cool: [Rgb, Rgb]
   /** 命中率偏低时文字用的提醒色 */
   warn: string
+  /** 子代理配色，按出现顺序轮换 */
+  hues: Rgb[]
+  /** 波浪低处混入的底色 */
+  waveBase: Rgb
 }
 
 const DARK: Palette = {
@@ -61,6 +69,15 @@ const DARK: Palette = {
     [74, 222, 128],
   ],
   warn: '#f59e0b',
+  hues: [
+    [56, 189, 248],
+    [167, 139, 250],
+    [244, 114, 182],
+    [52, 211, 153],
+    [251, 191, 36],
+    [251, 113, 133],
+  ],
+  waveBase: [55, 65, 81],
 }
 
 const LIGHT: Palette = {
@@ -79,6 +96,15 @@ const LIGHT: Palette = {
     [22, 163, 74],
   ],
   warn: '#d97706',
+  hues: [
+    [2, 132, 199],
+    [124, 58, 237],
+    [219, 39, 119],
+    [5, 150, 105],
+    [217, 119, 6],
+    [225, 29, 72],
+  ],
+  waveBase: [203, 213, 225],
 }
 
 const LIMIT_LABEL: Record<string, string> = { five_hour: '5h', seven_day: '7d', spend_limit: '额度' }
@@ -109,15 +135,27 @@ const CTX_LEVELS = [70, 85]
 const LIMIT_LEVELS = [90, 95]
 const STORE_INDEX = 'index'
 const STORE_KEEP = 40
+const PANEL_ID = 'context-meter-agents'
+const PANEL_TITLE = '⚙ 子代理'
+const DONE_KEEP = 6
+const TOOL_LOG_MAX = 40
+const AUTO_CLOSE_MS = 60_000
 
 // ── 选项（/config 里的 userConfig） ─────────────────────────────
-type Settings = { layout: 'auto' | 'full' | 'compact'; animation: boolean; trend: number; alerts: boolean }
+type Settings = {
+  layout: 'auto' | 'full' | 'compact'
+  animation: boolean
+  trend: number
+  alerts: boolean
+  agentPanel: 'auto' | 'sticky' | 'manual'
+}
 
 const readSettings = (o: PluginOptions): Settings => ({
   layout: o.layout === 'full' || o.layout === 'compact' ? o.layout : 'auto',
   animation: o.animation !== false,
   trend: o.trend === 'off' ? 0 : o.trend === '12' ? 12 : 24,
   alerts: o.alerts !== false,
+  agentPanel: o.agentPanel === 'sticky' || o.agentPanel === 'manual' ? o.agentPanel : 'auto',
 })
 
 // 模块级运行时：热重载时整个模块重新求值，这些随之归零
@@ -130,6 +168,8 @@ const rt = {
   needsEstimate: false,
   frameNo: 0,
   agentsRunning: 0,
+  toolSeq: 0,
+  closePending: false,
   ticker: null as Timer | null,
   slow: null as Timer | null,
 }
@@ -300,6 +340,78 @@ const sparkCells = (
   ]
 }
 
+/**
+ * 流动波浪：两段不同频率的正弦叠加、匀速向右滑；活跃度 energy 决定振幅，
+ * 越活跃波越高、还叠一层细碎涟漪。速度固定（只调振幅），避免变速时相位跳。
+ */
+const waveCells = (pal: Palette, hue: Rgb, width: number, t: number, energy: number, seed: number): Cell[] => {
+  const base = mix(pal.waveBase, hue, 0.25)
+  const cells: Cell[] = []
+  for (let x = 0; x < width; x++) {
+    const v =
+      0.55 * Math.sin(x * 0.42 - t + seed) +
+      0.3 * Math.sin(x * 0.16 - t * 0.55 + seed * 2.1) +
+      0.15 * energy * Math.sin(x * 1.1 - t * 2.2 + seed * 0.7)
+    const height = clamp(((v + 1) / 2) * energy, 0, 1)
+    // 颜色分四档，减少要画的段数
+    const tone = Math.round(height * 3) / 3
+    cells.push({ ch: SPARK[Math.round(height * 7)]!, color: css(mix(base, hue, 0.3 + 0.7 * tone)) })
+  }
+  return cells
+}
+
+const EIGHTHS = [' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█']
+
+/** 多行高的波浪（自上而下返回各行）：同一列的高度跨行连续填满，起伏更明显。 */
+const waveRows = (
+  pal: Palette,
+  hue: Rgb,
+  width: number,
+  t: number,
+  energy: number,
+  seed: number,
+  rows: number,
+): Cell[][] => {
+  const base = mix(pal.waveBase, hue, 0.25)
+  const out: Cell[][] = Array.from({ length: rows }, () => [])
+  for (let x = 0; x < width; x++) {
+    const v =
+      0.55 * Math.sin(x * 0.42 - t + seed) +
+      0.3 * Math.sin(x * 0.16 - t * 0.55 + seed * 2.1) +
+      0.15 * energy * Math.sin(x * 1.1 - t * 2.2 + seed * 0.7)
+    const height = clamp(((v + 1) / 2) * energy, 0, 1)
+    const eighths = Math.max(1, Math.round(height * rows * 8))
+    const tone = Math.round(height * 3) / 3
+    const color = css(mix(base, hue, 0.3 + 0.7 * tone))
+    for (let r = 0; r < rows; r++) {
+      const fill = clamp(eighths - r * 8, 0, 8)
+      out[rows - 1 - r]!.push({ ch: EIGHTHS[fill]!, color })
+    }
+  }
+  return out
+}
+
+/** 活跃度：刚有动静为 1，约 9 秒衰减一半多，最低 0.22；工具在跑时至少 0.85。 */
+const energyOf = (a: AgentActivity, now: number): number => {
+  const e = 0.22 + 0.78 * Math.exp(-Math.max(0, now - a.lastActivity) / 9000)
+  return a.currentTool !== null ? Math.max(e, 0.85) : e
+}
+
+/** 时长：0.3s / 12s / 1:42。 */
+const span = (ms: number): string => {
+  if (ms < 1000) return `${(ms / 1000).toFixed(1)}s`
+  if (ms < 60_000) return `${Math.floor(ms / 1000)}s`
+  return mmss(ms)
+}
+
+const touchAgent = (
+  f: AgentActivity[] | null,
+  id: string,
+  change: (a: AgentActivity) => AgentActivity,
+): AgentActivity[] => (f ?? []).map(a => (a.id === id ? change(a) : a))
+
+const isToolSpawningAgent = (tool: string): boolean => tool === 'Agent' || tool === 'Task'
+
 // ── 数据 ──────────────────────────────────────────────────────
 const toLimit = (r: SessionRateLimit): Limit => ({
   kind: r.kind,
@@ -410,7 +522,8 @@ const checkAlerts = async ($: EngineInterface): Promise<void> => {
  * 一次模型请求完成（turn.step）：累计 token、上下文占用、费用与限额即时刷新，
  * 不等整轮对话结束。主对话的请求更新上下文占用；子代理的请求只计入子代理累计。
  */
-const applyStep = async ($: EngineInterface, u: TurnUsage, isSubagent: boolean): Promise<void> => {
+const applyStep = async ($: EngineInterface, u: TurnUsage, agentId: string | undefined): Promise<void> => {
+  const isSubagent = agentId !== undefined
   const su = await $.session.usage()
   const sum = u.input_tokens + u.output_tokens + u.cache_read_input_tokens + u.cache_creation_input_tokens
   // /clear 会把 startedAt 重置，此时累计清零
@@ -434,6 +547,10 @@ const applyStep = async ($: EngineInterface, u: TurnUsage, isSubagent: boolean):
     const percent = fresh.window > 0 ? Math.round((tokens / fresh.window) * 100) : fresh.percent
     return { ...fresh, tokens, percent, isEstimate: false }
   })
+  if (agentId !== undefined) {
+    const now = await $.clock.now()
+    await update($, fleet, f => touchAgent(f, agentId, a => ({ ...a, tokens: a.tokens + sum, lastActivity: now })))
+  }
 }
 
 /** 压缩完成：占用立刻换成压缩后的大小，走势打标记，记下前后大小。 */
@@ -480,15 +597,119 @@ const applyBurn = async (
   })
 }
 
-/** 正在运行的子代理 / 后台任务；返回个数。 */
-const refreshAgents = async ($: EngineInterface): Promise<number> => {
+/**
+ * 用引擎的子代理列表刷新侧栏：新出现的记下起始时刻和配色，结束的记下结束时刻，
+ * 已结束的只留最近几个。返回运行中的个数和新出现的运行中 id。
+ */
+const refreshFleet = async ($: EngineInterface): Promise<{ running: number; fresh: string[] }> => {
   const list = await $.agent.list()
-  const running = list.filter(a => a.status === 'running')
+  const now = await $.clock.now()
+  let running = 0
+  let fresh: string[] = []
+  const updated = await update($, fleet, f => {
+    const cur = f ?? []
+    const byId = new Map(cur.map(a => [a.id, a] as const))
+    let hue = cur.reduce((m, a) => Math.max(m, a.hue + 1), 0)
+    const out: AgentActivity[] = []
+    fresh = []
+    for (const info of list) {
+      const isRunning = info.status === 'running'
+      const label = info.name ?? info.description
+      const prev = byId.get(info.id)
+      if (prev) {
+        byId.delete(info.id)
+        out.push({
+          ...prev,
+          label: label || prev.label,
+          type: info.type,
+          status: info.status,
+          parentId: info.parentId ?? null,
+          endedAt: isRunning ? null : (prev.endedAt ?? now),
+          currentTool: isRunning ? prev.currentTool : null,
+        })
+      } else {
+        if (isRunning) fresh.push(info.id)
+        out.push({
+          id: info.id,
+          label,
+          type: info.type,
+          status: info.status,
+          parentId: info.parentId ?? null,
+          hue: hue++,
+          startedAt: now,
+          endedAt: isRunning ? null : now,
+          tools: 0,
+          tokens: 0,
+          currentTool: null,
+          lastActivity: now,
+        })
+      }
+    }
+    // 引擎不再列出的：当作已结束保留
+    for (const gone of byId.values()) {
+      out.push(gone.endedAt === null ? { ...gone, status: 'completed', endedAt: now, currentTool: null } : gone)
+    }
+    const live = out.filter(a => a.endedAt === null)
+    const done = out
+      .filter(a => a.endedAt !== null)
+      .sort((x, y) => (y.endedAt ?? 0) - (x.endedAt ?? 0))
+      .slice(0, DONE_KEEP)
+    running = live.length
+    return [...live, ...done]
+  })
+  const live = (updated ?? []).filter(a => a.endedAt === null)
   await update($, agents, () => ({
-    running: running.length,
-    items: running.slice(0, 5).map(a => ({ id: a.id, label: a.name ?? a.description, type: a.type })),
+    running: live.length,
+    items: live.slice(0, 5).map(a => ({ id: a.id, label: a.label, type: a.type })),
   }))
-  return running.length
+  return { running, fresh }
+}
+
+const openPanel = async ($: EngineInterface): Promise<void> => {
+  await update($, panel, p => ({ isOpen: true, dismissed: p?.dismissed ?? [], allDoneAt: null }))
+  await $.ui.open({ id: PANEL_ID, title: PANEL_TITLE })
+}
+
+/** 收起侧栏；此刻已有的子代理记为"已收起"，它们之后不会再把侧栏弹出来。 */
+const closePanel = async ($: EngineInterface): Promise<void> => {
+  const ids = ((await read($, fleet)) ?? []).map(a => a.id)
+  await update($, panel, p => ({
+    isOpen: false,
+    dismissed: [...new Set([...(p?.dismissed ?? []), ...ids])].slice(-200),
+    allDoneAt: null,
+  }))
+  await $.ui.close({ id: PANEL_ID })
+}
+
+/** 列表刷新后：记下运行数；有新子代理且没被收起过时按设置自动弹出侧栏。 */
+const onFleetChange = async ($: EngineInterface, r: { running: number; fresh: string[] }): Promise<void> => {
+  rt.agentsRunning = r.running
+  if (r.running > 0) rt.needsFrame = true
+  if (rt.settings.agentPanel === 'manual' || r.fresh.length === 0) return
+  const p = await read($, panel)
+  if (p?.isOpen) return
+  if (r.fresh.some(id => !(p?.dismissed ?? []).includes(id))) await openPanel($)
+}
+
+/** auto 模式：全部完成满 1 分钟自动收起。返回是否还在等。 */
+const autoClose = async ($: EngineInterface): Promise<boolean> => {
+  if (rt.settings.agentPanel !== 'auto' || rt.isDemo) return false
+  const p = await read($, panel)
+  if (!p?.isOpen) return false
+  if (rt.agentsRunning > 0) {
+    if (p.allDoneAt !== null) await update($, panel, cur => (cur ? { ...cur, allDoneAt: null } : cur))
+    return false
+  }
+  const now = await $.clock.now()
+  if (p.allDoneAt === null) {
+    await update($, panel, cur => (cur ? { ...cur, allDoneAt: now } : cur))
+    return true
+  }
+  if (now - p.allDoneAt >= AUTO_CLOSE_MS) {
+    await closePanel($)
+    return false
+  }
+  return true
 }
 
 // ── 跨重启：按会话 id 存快照，--resume 时读回 ────────────────────
@@ -552,10 +773,11 @@ const tickFrame = async ($: EngineInterface): Promise<void> => {
       await learnEstimate($)
     }
     const isIdle = await step($, isAnimated())
-    // 后台任务约每 2 秒查一次；要停帧前再确认一次
-    const every = isAnimated() ? 16 : 2
-    if (!rt.isDemo && (isIdle || rt.frameNo % every === 0)) rt.agentsRunning = await refreshAgents($)
-    if (isIdle && rt.agentsRunning === 0) rt.needsFrame = false
+    // 子代理列表约每秒查一次；要停帧前再确认一次
+    const every = isAnimated() ? 8 : 1
+    if (!rt.isDemo && (isIdle || rt.frameNo % every === 0)) await onFleetChange($, await refreshFleet($))
+    rt.closePending = await autoClose($)
+    if (isIdle && rt.agentsRunning === 0 && !rt.closePending) rt.needsFrame = false
   } finally {
     rt.isStepping = false
   }
@@ -568,7 +790,7 @@ const startTimers = ($: EngineInterface): void => {
   rt.slow = $.clock.every(60_000, () => void update($, minute, n => n + 1))
 }
 
-const seedDemo = async ($: EngineInterface, startedAt: number, isWorking: boolean): Promise<void> => {
+const seedDemo = async ($: EngineInterface, startedAt: number, isWorking: boolean, withAgents: boolean): Promise<void> => {
   const now = await $.clock.now()
   const iso = (ms: number) => new Date(now + ms).toISOString()
   await update($, meter, () => ({
@@ -609,6 +831,59 @@ const seedDemo = async ($: EngineInterface, startedAt: number, isWorking: boolea
   }))
   rt.agentsRunning = 0
   if (isWorking) await update($, run, () => ({ startedAt: now - 12000, tools: 3, limitsAtStart: [] }))
+  if (!withAgents) return
+  const agent = (
+    id: string,
+    type: string,
+    label: string,
+    hue: number,
+    ago: number,
+    rest: Partial<{ endedAt: number | null; status: string; tools: number; tokens: number; currentTool: string | null; idle: number }>,
+  ) => ({
+    id,
+    label,
+    type,
+    status: rest.status ?? 'running',
+    parentId: null,
+    hue,
+    startedAt: now - ago,
+    endedAt: rest.endedAt ?? null,
+    tools: rest.tools ?? 0,
+    tokens: rest.tokens ?? 0,
+    currentTool: rest.currentTool ?? null,
+    lastActivity: now - (rest.idle ?? 0),
+  })
+  await update($, fleet, () => [
+    agent('a1', 'Explore', '核对训练日志', 0, 102_000, { tools: 14, tokens: 31_000, currentTool: 'Grep', idle: 800 }),
+    agent('a2', 'general-purpose', '回填工作簿', 1, 58_000, { tools: 9, tokens: 18_000, idle: 14_000 }),
+    agent('a0', 'Explore', '搜索配置文件', 2, 300_000, { status: 'completed', endedAt: now - 269_000, tools: 6, tokens: 9_000 }),
+  ])
+  const ev = (seq: number, tool: string, owner: string | null, ago: number, took: number | null, isError = false) => ({
+    seq,
+    tool,
+    owner,
+    startedAt: now - ago,
+    endedAt: took === null ? null : now - ago + took,
+    isError,
+  })
+  await update($, toolLog, () => [
+    ev(1, 'Agent', null, 105_000, null),
+    ev(2, 'Read', 'a1', 60_000, 120),
+    ev(3, 'Edit', null, 40_000, 300, true),
+    ev(4, 'Bash', 'a2', 30_000, 2_400),
+    ev(5, 'Read', 'a2', 15_000, 90),
+    ev(6, 'Grep', 'a1', 800, null),
+  ])
+  await update($, toolCounts, () => ({ Read: 34, Bash: 12, Grep: 9, Edit: 7, Agent: 3, Write: 2 }))
+  await update($, agents, () => ({
+    running: 2,
+    items: [
+      { id: 'a1', label: '核对训练日志', type: 'Explore' },
+      { id: 'a2', label: '回填工作簿', type: 'general-purpose' },
+    ],
+  }))
+  rt.agentsRunning = 2
+  await openPanel($)
 }
 
 export const register: Register = (on, options) => {
@@ -632,9 +907,10 @@ export const register: Register = (on, options) => {
     await update($, run, () => null)
     // 仅供截图调样式：CONTEXT_METER_DEMO=1（静止）或 working（生成中）填示例数据，不发请求
     const demo = await $.env.get('CONTEXT_METER_DEMO')
-    rt.isDemo = demo === '1' || demo === 'working'
-    if (rt.isDemo) await seedDemo($, u.startedAt, demo === 'working')
+    rt.isDemo = demo === '1' || demo === 'working' || demo === 'agents'
+    if (rt.isDemo) await seedDemo($, u.startedAt, demo === 'working', demo === 'agents')
     else await restore($, u.startedAt)
+    await $.command.register({ name: 'agent-panel', description: '打开 / 收起子代理侧栏' })
     // 开场动画：条和数字从 0 长到当前值
     await update($, anim, () => ({ frame: 0, ctx: 0, hit: 0 }))
     if (e.isInteractive || (await $.session.surfaces()).length > 0) {
@@ -662,6 +938,29 @@ export const register: Register = (on, options) => {
     rt.ticker = null
     rt.slow = null
     return next(e)
+  })
+
+  on('command.run', { command: 'agent-panel' }, async $ => {
+    if ((await read($, panel))?.isOpen) {
+      await closePanel($)
+      return { text: '已收起子代理侧栏' }
+    }
+    await openPanel($)
+    return { text: '已打开子代理侧栏' }
+  })
+
+  // 有人用关闭键 / 关闭标记关掉侧栏：等同点"收起"
+  on('ui.close', async ($, e, next) => {
+    const done = await next(e)
+    if (e.id === PANEL_ID && e.origin.kind === 'person') {
+      const ids = ((await read($, fleet)) ?? []).map(a => a.id)
+      await update($, panel, p => ({
+        isOpen: false,
+        dismissed: [...new Set([...(p?.dismissed ?? []), ...ids])].slice(-200),
+        allDoneAt: null,
+      }))
+    }
+    return done
   })
 
   on('config.set', async ($, e, next) => {
@@ -698,16 +997,42 @@ export const register: Register = (on, options) => {
     return next(e)
   })
 
+  // 每次工具调用：只记工具名、属于谁、起止与成败（不记参数）；主对话调 Agent 时弹出侧栏
   on('tool.call', async ($, e, next) => {
-    await update($, run, r => (r ? { ...r, tools: r.tools + 1 } : r))
-    return next(e)
+    const owner = e.agentId ?? null
+    const tool = String(e.tool)
+    if (owner === null) await update($, run, r => (r ? { ...r, tools: r.tools + 1 } : r))
+    if (rt.isDemo) return next(e)
+    const seq = ++rt.toolSeq
+    const now = await $.clock.now()
+    await update($, toolLog, log =>
+      [...(log ?? []), { seq, tool, owner, startedAt: now, endedAt: null, isError: false }].slice(-TOOL_LOG_MAX),
+    )
+    await update($, toolCounts, c => ({ ...(c ?? {}), [tool]: (c?.[tool] ?? 0) + 1 }))
+    if (owner !== null) {
+      if (!((await read($, fleet)) ?? []).some(a => a.id === owner)) await onFleetChange($, await refreshFleet($))
+      await update($, fleet, f => touchAgent(f, owner, a => ({ ...a, tools: a.tools + 1, currentTool: tool, lastActivity: now })))
+    } else if (isToolSpawningAgent(tool) && rt.settings.agentPanel !== 'manual' && !(await read($, panel))?.isOpen) {
+      await openPanel($)
+    }
+    rt.needsFrame = true
+    const res = await next(e)
+    const end = await $.clock.now()
+    const isError = res.deny !== undefined || res.isError === true
+    await update($, toolLog, log => (log ?? []).map(x => (x.seq === seq ? { ...x, endedAt: end, isError } : x)))
+    if (owner !== null) {
+      await update($, fleet, f => touchAgent(f, owner, a => ({ ...a, currentTool: null, lastActivity: end })))
+    } else if (isToolSpawningAgent(tool)) {
+      await onFleetChange($, await refreshFleet($))
+    }
+    return res
   })
 
   // 每次模型请求一结束就刷新，一轮里调多次工具时数字会跟着走
   on('turn.step', async function* ($, e, next) {
     const res = yield* next(e)
     if (res.usage && !rt.isDemo) {
-      await applyStep($, res.usage, e.agentId !== undefined)
+      await applyStep($, res.usage, e.agentId)
       if (rt.settings.alerts && e.agentId === undefined) await checkAlerts($)
       rt.needsFrame = true
     }
@@ -731,6 +1056,7 @@ export const register: Register = (on, options) => {
 
   on('turn.complete', async ($, e, next) => {
     const isSubagent = e.agentId !== undefined
+    if (isSubagent && !rt.isDemo) await onFleetChange($, await refreshFleet($))
     const r = isSubagent ? null : await read($, run)
     if (!isSubagent) await update($, run, () => null)
     const u = e.usage
@@ -757,6 +1083,186 @@ export const register: Register = (on, options) => {
     }
     rt.needsFrame = true
     return next(e)
+  })
+
+  // ── 子代理侧栏：每个运行中的子代理一条流动波浪，下面是工具时间线（不含参数）
+  on('ui.render', { component: 'Pane', requestId: PANEL_ID }, async ($, e) => {
+    const fl = (await read($, fleet)) ?? []
+    const log = (await read($, toolLog)) ?? []
+    const counts = (await read($, toolCounts)) ?? {}
+    const a = await read($, anim)
+    const pal = (await read($, isLight)) ? LIGHT : DARK
+    const isSmooth = rt.settings.animation && !(await read($, isReducedMotion))
+    await read($, minute)
+    const now = await $.clock.now()
+    const { Box, Text, Button } = $.ui.resolve(e)
+    const W = Math.max(20, e.props.bodyColumns)
+    const isInline = e.props.placement === 'inline'
+    const frame = a?.frame ?? 0
+    const t = isSmooth ? frame * 0.32 : 0
+
+    const hueOf = (i: number): Rgb => pal.hues[i % pal.hues.length]!
+    const paint = (cells: Cell[]) =>
+      runs(cells).map(c => (
+        <Text color={c.color} dimColor={c.isDim} bold={c.isBold}>
+          {c.ch}
+        </Text>
+      ))
+    const byId = new Map(fl.map(x => [x.id, x] as const))
+    const ownerOf = (id: string | null) => (id === null ? null : byId.get(id) ?? null)
+    const statusIcon = (x: AgentActivity, i: number) =>
+      x.endedAt === null
+        ? isSmooth
+          ? SPIN[(frame + i * 3) % SPIN.length]!
+          : '✻'
+        : x.status === 'failed'
+          ? '✗'
+          : x.status === 'killed'
+            ? '■'
+            : '✓'
+
+    // 父子关系：子代理的子代理缩进挂在父下面
+    const live = fl.filter(x => x.endedAt === null)
+    const done = fl.filter(x => x.endedAt !== null)
+    const depthOf = (x: AgentActivity): number => {
+      let d = 0
+      let cur = x.parentId ? byId.get(x.parentId) : undefined
+      while (cur && d < 3) {
+        d++
+        cur = cur.parentId ? byId.get(cur.parentId) : undefined
+      }
+      return d
+    }
+
+    // 右上角留两格给引擎自己的关闭标记 ×，读起来是「收起 ×」
+    const collapse = (
+      <Box marginRight={2}>
+        <Button key="collapse" plain dimColor label="收起" onPress={() => closePanel($)} />
+      </Box>
+    )
+
+    // 一行一个子代理的紧凑版：面板没法停靠在旁边（不是全屏界面）时用
+    if (isInline) {
+      const waveW = clamp(W - 34, 8, 24)
+      return (
+        <Box flexDirection="column" width={W}>
+          <Box flexDirection="row" justifyContent="space-between">
+            <Text dimColor>{`${live.length} 运行 · ${done.length} 完成`}</Text>
+            {collapse}
+          </Box>
+          {live.map((x, i) => {
+            const hue = css(hueOf(x.hue))
+            return (
+              <Box flexDirection="row">
+                <Text color={hue}>{`${statusIcon(x, i)} `}</Text>
+                <Box width={16}>
+                  <Text wrap="truncate" bold>
+                    {x.type}
+                  </Text>
+                </Box>
+                <Text>{paint(waveCells(pal, hueOf(x.hue), waveW, t, energyOf(x, now), x.hue * 1.7))}</Text>
+                <Text dimColor>{`  ${mmss(now - x.startedAt)}  🔧 ${x.tools}`}</Text>
+              </Box>
+            )
+          })}
+        </Box>
+      )
+    }
+
+    const waveW = W - 4
+    const rows = e.viewport?.rows ?? 40
+    // 先给子代理，剩下的行给工具时间线
+    const agentRows = live.length * 6 + Math.min(done.length, 4) * 1 + 3
+    const toolRows = clamp(rows - agentRows - 6, 3, 10)
+    const shownLog = log.slice(-toolRows).reverse()
+    const top = Object.entries(counts)
+      .sort((x, y) => y[1] - x[1])
+      .slice(0, 6)
+
+    return (
+      <Box flexDirection="column" width={W}>
+        <Box flexDirection="row" justifyContent="space-between">
+          <Text>
+            {live.length > 0 ? <Text color={pal.accent} bold>{`${live.length} 运行`}</Text> : <Text dimColor>无运行中</Text>}
+            <Text dimColor>{` · ${done.length} 完成`}</Text>
+          </Text>
+          {collapse}
+        </Box>
+        <Text dimColor>{'─'.repeat(W)}</Text>
+
+        {live.length === 0 && done.length === 0 ? <Text dimColor>还没有调用子代理</Text> : null}
+
+        {live.map((x, i) => {
+          const hue = css(hueOf(x.hue))
+          const pad = '  '.repeat(depthOf(x))
+          const energy = energyOf(x, now)
+          return (
+            <Box key={`live-${x.id}`} flexDirection="column" marginBottom={1}>
+              <Box flexDirection="row" justifyContent="space-between">
+                <Text wrap="truncate">
+                  {pad}
+                  <Text color={hue} bold>{`${statusIcon(x, i)} `}</Text>
+                  <Text bold>{x.type}</Text>
+                </Text>
+                <Text color={hue}>{mmss(now - x.startedAt)}</Text>
+              </Box>
+              <Text dimColor wrap="truncate">{`${pad}  ${x.label}`}</Text>
+              {waveRows(pal, hueOf(x.hue), Math.max(8, waveW - pad.length), t, energy, x.hue * 1.7, 2).map(row => (
+                <Text>
+                  {`${pad}  `}
+                  {paint(row)}
+                </Text>
+              ))}
+              <Text wrap="truncate">
+                <Text dimColor>{`${pad}  🔧 ${x.tools} · ${fmt(x.tokens)} · `}</Text>
+                {x.currentTool !== null ? (
+                  <Text color={hue}>{`▸ ${x.currentTool}`}</Text>
+                ) : (
+                  <Text dimColor>{now - x.lastActivity > 20_000 ? `静默 ${span(now - x.lastActivity)}` : '思考中'}</Text>
+                )}
+              </Text>
+            </Box>
+          )
+        })}
+
+        {done.slice(0, 4).map((x, i) => (
+          <Box key={`done-${x.id}`} flexDirection="row" justifyContent="space-between">
+            <Text wrap="truncate">
+              <Text color={x.status === 'failed' ? pal.warn : css(hueOf(x.hue))}>{`${statusIcon(x, i)} `}</Text>
+              <Text dimColor>{`${x.type} · ${x.label}`}</Text>
+            </Text>
+            <Text dimColor>{` ${mmss((x.endedAt ?? now) - x.startedAt)} · 🔧${x.tools}`}</Text>
+          </Box>
+        ))}
+
+        {shownLog.length > 0 ? (
+          <Text dimColor>{`── 工具 ${'─'.repeat(Math.max(2, W - 8))}`}</Text>
+        ) : null}
+        {shownLog.map(ev => {
+          const owner = ownerOf(ev.owner)
+          const isRunning = ev.endedAt === null
+          const icon = isRunning ? (isSmooth ? SPIN[(frame + ev.seq) % SPIN.length]! : '✻') : ev.isError ? '✗' : '✓'
+          const iconColor = isRunning ? pal.accent : ev.isError ? pal.warn : undefined
+          return (
+            <Box key={`tool-${ev.seq}`} flexDirection="row" justifyContent="space-between">
+              <Text wrap="truncate">
+                <Text color={iconColor} dimColor={!isRunning && !ev.isError}>{`${icon} `}</Text>
+                <Text bold={isRunning}>{ev.tool.padEnd(9)}</Text>
+                <Text color={owner ? css(hueOf(owner.hue)) : undefined} dimColor={!owner}>
+                  {owner ? owner.type : ev.owner === null ? '主对话' : '子代理'}
+                </Text>
+              </Text>
+              <Text dimColor={!isRunning} color={ev.isError ? pal.warn : undefined}>
+                {` ${isRunning ? span(now - ev.startedAt) : ev.isError ? '失败' : span((ev.endedAt ?? now) - ev.startedAt)}`}
+              </Text>
+            </Box>
+          )
+        })}
+        {top.length > 0 ? (
+          <Text dimColor wrap="truncate">{top.map(([k, v]) => `${k} ${v}`).join(' · ')}</Text>
+        ) : null}
+      </Box>
+    )
   })
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
@@ -815,8 +1321,25 @@ export const register: Register = (on, options) => {
     const statusText = isWorking ? `${spin} 生成中 ${r ? mmss(now - r.startedAt) : ''}` : l ? `✓ ${l.seconds}s` : '◇ 就绪'
     const toolsNow = isWorking ? (r?.tools ?? 0) : (l?.tools ?? 0)
     const toolsText = toolsNow > 0 ? `  🔧 ${toolsNow}` : ''
-    const agentsText = ag && ag.running > 0 ? `  ⚙ ${ag.running}` : ''
-    const left = ` ${statusText}${toolsText}${agentsText} `
+    const fl = await read($, fleet)
+    const runningN = (fl ?? []).filter(x => x.endedAt === null).length || (ag?.running ?? 0)
+    const hasAgents = (fl?.length ?? 0) > 0 || runningN > 0
+    const agentsLabel = `⚙ ${runningN}`
+    // 按钮本身 + 后面一个空格
+    const agentsW = hasAgents ? cellWidth(agentsLabel) + 1 : 0
+    const agentsBtn = hasAgents ? (
+      <Button
+        key="agents"
+        plain
+        dimColor={runningN === 0}
+        label={agentsLabel}
+        onPress={async () => {
+          if ((await read($, panel))?.isOpen) await closePanel($)
+          else await openPanel($)
+        }}
+      />
+    ) : null
+    const left = ` ${statusText}${toolsText}${hasAgents ? ' ' : ''} `
     const leftColor = isWorking ? pal.accent : undefined
 
     const toggle = (
@@ -935,22 +1458,25 @@ export const register: Register = (on, options) => {
       const widthOf = (segs: Seg[]) => segs.reduce((s, x) => s + cellWidth(x.t), 0)
       // 放得下就全给，放不下依次去掉：Σ → 重置倒计时 → 额度
       let segs = build(0)
-      for (let level = 1; level <= 3 && W - 1 - cellWidth(left) - (3 + barW + widthOf(segs)) - 8 < 3; level++) {
+      for (let level = 1; level <= 3 && W - 1 - cellWidth(left) - agentsW - (3 + barW + widthOf(segs)) - 8 < 3; level++) {
         segs = build(level)
       }
-      const rule = Math.max(1, W - 1 - cellWidth(left) - (3 + barW + widthOf(segs)) - 8)
+      const rule = Math.max(1, W - 1 - cellWidth(left) - agentsW - (3 + barW + widthOf(segs)) - 8)
       const marker =
         m && compactAt !== null && m.window > 0 ? clamp(Math.floor((compactAt / m.window) * barW), 0, barW - 1) : null
       const glint = isWorking && isSmooth ? (frame % (barW + 6)) - 3 : -1
       return (
         <Box flexDirection="column" width={W}>
           <Box flexDirection="row">
-            <Text wrap="truncate">
+            <Text>
               <Text dimColor>─</Text>
               <Text color={leftColor} dimColor={!isWorking} bold={isWorking}>
                 {left}
               </Text>
-              <Text dimColor>{'─'.repeat(rule)}</Text>
+            </Text>
+            {agentsBtn}
+            <Text wrap="truncate">
+              <Text dimColor>{(agentsBtn ? ' ' : '') + '─'.repeat(rule)}</Text>
               <Text dimColor>{' ⛁ '}</Text>
               {paint(barCells(pal, p => rgbAt(pal, p), shownCtx, barW, marker, glint))}
               {segs.map(s => (
@@ -998,7 +1524,7 @@ export const register: Register = (on, options) => {
       l ? shortModel(l.model) : null,
     ].filter((x): x is string => x !== null)
     const meta = metaParts.length > 0 ? ` ${metaParts.join(' · ')} ` : ' '
-    const rule = Math.max(2, W - 1 - cellWidth(left) - cellWidth(meta) - 4)
+    const rule = Math.max(2, W - 1 - cellWidth(left) - agentsW - cellWidth(meta) - 4)
     const marker =
       m && compactAt !== null && m.window > 0 ? clamp(Math.floor((compactAt / m.window) * barW), 0, barW - 1) : null
     const glint = isWorking && isSmooth ? (frame % (barW + 6)) - 3 : -1
@@ -1008,15 +1534,20 @@ export const register: Register = (on, options) => {
 
     return (
       <Box flexDirection="column" width={W}>
-        <Text wrap="truncate">
-          <Text dimColor>─</Text>
-          <Text color={leftColor} dimColor={!isWorking} bold={isWorking}>
-            {left}
+        <Box flexDirection="row">
+          <Text>
+            <Text dimColor>─</Text>
+            <Text color={leftColor} dimColor={!isWorking} bold={isWorking}>
+              {left}
+            </Text>
           </Text>
-          <Text dimColor>{'─'.repeat(rule)}</Text>
-          <Text dimColor>{meta}</Text>
-          <Text dimColor>{'────'}</Text>
-        </Text>
+          {agentsBtn}
+          <Text wrap="truncate">
+            <Text dimColor>{(agentsBtn ? ' ' : '') + '─'.repeat(rule)}</Text>
+            <Text dimColor>{meta}</Text>
+            <Text dimColor>{'────'}</Text>
+          </Text>
+        </Box>
 
         <Box key="fill" flexDirection="row" justifyContent="space-between">
           <Box flexDirection="row">

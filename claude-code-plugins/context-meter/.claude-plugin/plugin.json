@@ -1,7 +1,7 @@
 {
   "name": "context-meter",
-  "version": "0.3.0",
-  "description": "提示框上方的会话仪表：上下文占用与压缩、缓存命中、额度与重置倒计时、子代理，逐次请求实时刷新",
+  "version": "0.4.0",
+  "description": "提示框上方的会话仪表 + 子代理侧栏：上下文占用与压缩、缓存命中、额度与重置倒计时，子代理以流动波浪显示活跃度，逐次请求实时刷新",
   "author": {
     "name": "cy"
   },
@@ -40,6 +40,17 @@
       "title": "阈值提醒",
       "description": "上下文 70% / 85%、额度 90% / 95% 与发生压缩时弹出提示",
       "default": true
+    },
+    "agentPanel": {
+      "type": "string",
+      "title": "子代理侧栏",
+      "description": "auto：调用子代理时弹出、全部完成 1 分钟后收起；sticky：弹出后一直留着；manual：只在点 ⚙ 或 /agent-panel 时打开",
+      "default": "auto",
+      "options": [
+        "auto",
+        "sticky",
+        "manual"
+      ]
     }
   }
 }
