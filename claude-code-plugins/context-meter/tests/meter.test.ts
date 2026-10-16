@@ -54,7 +54,7 @@ const STEP_USAGE = {
 
 // 引擎自身行为的替身：测试里 on 注册的钩子位于所有插件之下
 const engine = (on: On, toasts: string[] = [], mem: Record<string, unknown> = {}) => {
-  mock.clock(on, { now: T0 })
+  const clock = mock.clock(on, { now: T0 })
   on('store.get', ($, e) => ({ value: mem[e.key] }))
   on('store.set', ($, e) => {
     mem[e.key] = e.value
@@ -83,6 +83,7 @@ const engine = (on: On, toasts: string[] = [], mem: Record<string, unknown> = {}
     const { Text } = $.ui.resolve(e)
     return h(Text, {}, 'engine band') as RenderElement
   })
+  return clock
 }
 
 const endTurn = ($: { turn: { complete: (e: never) => Promise<unknown> } }) =>
@@ -114,16 +115,20 @@ test('full layout updates after every model request, not only at turn end', { op
 
   for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await $.ui.mount({ plugin: 'context-meter', surface, ...BAND })
-    expect(await ui.find({ type: 'Text', text: /✓ 42s/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /42s/ })).toBeDefined()
     // 轮次结束：累计不重复计入，只加轮数
     expect(await ui.find({ type: 'Text', text: /Σ 93\.4k · 1 轮 · \$3\.21 · opus-5-5/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /上轮 99%/ })).toBeDefined()
-    // 额度：饼图标 + 紧凑的重置倒计时
-    expect(await ui.find({ type: 'Text', text: /^ ↻3h$/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /^ ↻2d14h$/ })).toBeDefined()
-    expect((await ui.find({ type: 'Text', text: /^ ?46%$/ }))?.props.color).toBe('#eccd1e')
     await ui.unmount()
   }
+
+  // 终端：饼图标 + 紧凑的重置倒计时，占用数字按梯度上色
+  const term = await $.ui.mount({ plugin: 'context-meter', surface: 'terminal', ...BAND })
+  expect(await term.find({ type: 'Text', text: /✓ 42s/ })).toBeDefined()
+  expect(await term.find({ type: 'Text', text: /^ ↻3h$/ })).toBeDefined()
+  expect(await term.find({ type: 'Text', text: /^ ↻2d14h$/ })).toBeDefined()
+  expect((await term.find({ type: 'Text', text: /^ ?46%$/ }))?.props.color).toBe('#eccd1e')
+  await term.unmount()
 
   // 展开明细：/context 分类、额度消耗
   const ui = await $.ui.mount({ plugin: 'context-meter', surface: 'terminal', ...BAND })
@@ -257,6 +262,131 @@ test('band yields to a survey', async ($, on) => {
   await ui.unmount()
 })
 
+// ── 桌面端 ─────────────────────────────────────────────────────
+// 比例字体下，拼出来的横线、条形字符会忽长忽短：桌面端一个都不画，条和走势用 Svg
+const BOX_DRAWING = /[─━┄┃╸▁▂▃▄▅▆▇█]/
+
+const finishTurn = async ($: never) => {
+  const e = $ as { turn: { start: (e: never) => Promise<unknown>; step: (e: never) => AsyncIterable<unknown> } }
+  await e.turn.start({ text: 'hi', turnId: 't1' } as never)
+  for await (const chunk of e.turn.step({ turnId: 't1', index: 0, model: 'claude-opus-5-5', messageCount: 3 } as never)) void chunk
+  await endTurn($)
+}
+
+const noBoxDrawing = async (ui: { findAll: (q: { type: string }) => Promise<{ text: string }[]> }) => {
+  for (const x of await ui.findAll({ type: 'Text' })) expect(x.text).not.toMatch(BOX_DRAWING)
+}
+
+test('desktop: a header and a row of cards, bars drawn as Svg', { options: { layout: 'full' } }, async ($, on) => {
+  engine(on)
+  await finishTurn($ as never)
+  const ui = await $.ui.mount({ plugin: 'context-meter', surface: 'desktop', ...BAND })
+  expect(await ui.find({ type: 'Text', text: /^42s$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^上下文$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^46%$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^92\.1k \/ 200k$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^缓存命中$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^5h 额度$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^3h 后重置$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^2d14h 后重置$/ })).toBeDefined()
+  // 平常不上色，偏高才用主题的 warning：46% 不上色，7d 84% 上色
+  expect((await ui.find({ type: 'Text', text: /^46%$/ }))?.props.color).toBeUndefined()
+  expect((await ui.find({ type: 'Text', text: /^84%$/ }))?.props.color).toBe('warning')
+  // 上下文、缓存、5h、7d 四根条，上下文那根带压缩阈值竖线（167k / 200k）
+  const bars = await ui.findAll({ type: 'Svg' })
+  expect(bars.length).toBeGreaterThanOrEqual(4)
+  expect(String(bars[0]!.props.source)).toContain('<svg')
+  expect(bars[0]!.props.alt).toBe('上下文 46%')
+  await noBoxDrawing(ui)
+  await ui.unmount()
+})
+
+test('desktop: cards fold into two rows when narrow', { options: { layout: 'full' } }, async ($, on) => {
+  engine(on)
+  await finishTurn($ as never)
+  const ui = await $.ui.mount({
+    plugin: 'context-meter',
+    surface: 'desktop',
+    ...BAND,
+    props: { ...BAND.props, bodyColumns: 60 },
+  })
+  const tree = JSON.stringify(await ui.drawn())
+  expect(tree).toContain('"row-1"')
+  expect(await ui.find({ type: 'Text', text: /^7d 额度$/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('desktop: details show the context makeup once, without repeating the limits', { options: { layout: 'full' } }, async ($, on) => {
+  engine(on)
+  await finishTurn($ as never)
+  const ui = await $.ui.mount({ plugin: 'context-meter', surface: 'desktop', ...BAND })
+  expect((await ui.find({ key: 'toggle' }))?.props.label).toBe('明细 ▾')
+  await ui.press({ key: 'toggle' })
+  expect((await ui.find({ key: 'toggle' }))?.props.label).toBe('收起 ▴')
+  expect(await ui.find({ type: 'Text', text: /^上下文构成$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /已用 80k \/ 200k · 压缩阈值 167k/ })).toBeDefined()
+  // 图例：分类名、数量、占比
+  expect(await ui.find({ type: 'Text', text: /^● 对话消息 60k 75%$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^● 系统提示词 20k 25%$/ })).toBeDefined()
+  // 重置倒计时只在卡片里出现一次
+  expect(await ui.findAll({ type: 'Text', text: /2d14h/ })).toHaveLength(1)
+  await noBoxDrawing(ui)
+  await ui.unmount()
+})
+
+test('desktop: idle folds to one line, dropping Σ and countdowns when narrow', async ($, on) => {
+  engine(on)
+  await finishTurn($ as never)
+  const idle = await $.ui.mount({ plugin: 'context-meter', surface: 'desktop', ...BAND })
+  expect(await idle.find({ type: 'Text', text: /^缓存命中$/ })).toBeUndefined()
+  expect(await idle.find({ type: 'Text', text: /^46%$/ })).toBeDefined()
+  expect(await idle.find({ type: 'Text', text: /^缓存 99%$/ })).toBeDefined()
+  expect(await idle.find({ type: 'Text', text: /^7d 84% ↻2d14h$/ })).toBeDefined()
+  expect(await idle.find({ type: 'Text', text: /^Σ 93\.4k$/ })).toBeDefined()
+  await noBoxDrawing(idle)
+  await idle.unmount()
+
+  const narrow = await $.ui.mount({
+    plugin: 'context-meter',
+    surface: 'desktop',
+    ...BAND,
+    props: { ...BAND.props, bodyColumns: 64 },
+  })
+  expect(await narrow.find({ type: 'Text', text: /^Σ/ })).toBeUndefined()
+  expect(await narrow.find({ type: 'Text', text: /↻/ })).toBeUndefined()
+  expect(await narrow.find({ type: 'Text', text: /^46%$/ })).toBeDefined()
+  expect(await narrow.find({ type: 'Text', text: /^缓存 99%$/ })).toBeDefined()
+  await narrow.unmount()
+})
+
+test('desktop: the band holds still between animation frames', async ($, on) => {
+  const clock = engine(on)
+  on('session.start', ($, e) => ({ cwd: e.cwd }))
+  on('config.list', () => ({ value: [] }))
+  on('session.surfaces', () => ({ value: [] }))
+  on('agent.list', () => ({ value: [] }))
+  on('command.register', () => ({ value: undefined }) as never)
+  mock.env(on, {})
+  // 交互会话：起动画计时器
+  await $.session.start({ cwd: '/w', surface: null, isInteractive: true })
+  await $.turn.start({ text: 'hi', turnId: 't1' })
+  for await (const chunk of $.turn.step({ turnId: 't1', index: 0, model: 'claude-opus-5-5', messageCount: 3 })) void chunk
+  await clock.advance(2000)
+
+  const desk = await $.ui.mount({ plugin: 'context-meter', surface: 'desktop', ...BAND })
+  const term = await $.ui.mount({ plugin: 'context-meter', surface: 'terminal', ...BAND })
+  const deskBefore = JSON.stringify(await desk.drawn())
+  const termBefore = JSON.stringify(await term.drawn())
+  await clock.advance(5000)
+  // 终端照常一帧帧地动（转圈、秒表）；桌面端一字不变：不跟动画帧，也不走秒表
+  expect(JSON.stringify(await term.drawn())).not.toBe(termBefore)
+  expect(JSON.stringify(await desk.drawn())).toBe(deskBefore)
+  expect(await desk.find({ type: 'Text', text: /^生成中$/ })).toBeDefined()
+  for (const svg of await desk.findAll({ type: 'Svg' })) expect(svg.props.isInteractive).toBeUndefined()
+  await desk.unmount()
+  await term.unmount()
+})
+
 // ── 子代理侧栏 ─────────────────────────────────────────────────
 const PANE = {
   component: 'Pane',
@@ -356,4 +486,41 @@ test('manual mode opens only from the ⚙ button in the band', { options: { agen
   await band.press({ key: 'agents' })
   expect(opened).toEqual(['context-meter-agents'])
   await band.unmount()
+})
+
+test('desktop side panel: waves are Svg, still no tool arguments', async ($, on) => {
+  engine(on)
+  const closed: string[] = []
+  agentsWorld(on, [{ id: 'a1', description: '核对训练日志', type: 'Explore', status: 'running' }], [], closed)
+  await $.tool.call({ tool: 'Agent', description: 'secret-desc', prompt: 'secret-prompt', subagent_type: 'Explore' } as never)
+  await $.tool.call({ tool: 'Grep', pattern: 'secret-pattern', path: '/secret/path', agentId: 'a1' } as never)
+
+  const ui = await $.ui.mount({ plugin: 'context-meter', surface: 'desktop', ...PANE })
+  expect(await ui.find({ type: 'Text', text: /^1 运行$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^Explore$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^核对训练日志$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^🔧 1 · 0 · 思考中$/ })).toBeDefined()
+  // 波浪自己用 SMIL 动，画成普通图片（不用沙箱框架），尺寸固定
+  const wave = await ui.find({ type: 'Svg' })
+  expect(wave?.props.isInteractive).toBeUndefined()
+  expect(wave?.props.width).toBeGreaterThan(0)
+  expect(String(wave?.props.source)).toContain('animateTransform')
+  expect(await ui.find({ type: 'Text', text: /^工具$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^Grep$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /secret/ })).toBeUndefined()
+  await noBoxDrawing(ui)
+  await ui.press({ key: 'collapse' })
+  expect(closed).toEqual(['context-meter-agents'])
+  await ui.unmount()
+})
+
+test('desktop side panel holds still with animation off', { options: { animation: false } }, async ($, on) => {
+  engine(on)
+  agentsWorld(on, [{ id: 'a1', description: '核对训练日志', type: 'Explore', status: 'running' }], [], [])
+  await $.tool.call({ tool: 'Read', file_path: '/x', agentId: 'a1' } as never)
+  const ui = await $.ui.mount({ plugin: 'context-meter', surface: 'desktop', ...PANE })
+  const wave = await ui.find({ type: 'Svg' })
+  expect(wave?.props.isInteractive).toBeUndefined()
+  expect(String(wave?.props.source)).not.toContain('animate')
+  await ui.unmount()
 })

@@ -10,7 +10,9 @@ import type {
   TurnUsage,
 } from 'claude-code'
 
-import type { AgentActivity, Alerts, Breakdown, Burn, History, Limit, Meter, Snapshot, ToolEvent, Totals } from '../types'
+import type { AgentActivity, Agents, Alerts, Breakdown, Burn, History, Limit, Meter, Snapshot, ToolEvent, Totals } from '../types'
+import { agentTint, categoryTint, desktopBand, desktopPane, TINT, type BandView, type PaneView, type Tile, type Tone } from './desktop'
+import { cellWidth, clamp } from './util'
 
 const meter = atom({ plugin: 'context-meter', key: 'meter' } as const, null)
 const totals = atom({ plugin: 'context-meter', key: 'totals' } as const, null)
@@ -27,6 +29,7 @@ const toolCounts = atom({ plugin: 'context-meter', key: 'toolCounts' } as const,
 const panel = atom({ plugin: 'context-meter', key: 'panel' } as const, null)
 const alerts = atom({ plugin: 'context-meter', key: 'alerts' } as const, null)
 const minute = atom({ plugin: 'context-meter', key: 'minute' } as const, 0)
+const second = atom({ plugin: 'context-meter', key: 'second' } as const, 0)
 const isExpanded = atom({ plugin: 'context-meter', key: 'isExpanded' } as const, false)
 const breakdown = atom({ plugin: 'context-meter', key: 'breakdown' } as const, null)
 const compact = atom({ plugin: 'context-meter', key: 'compact' } as const, null)
@@ -170,6 +173,7 @@ const rt = {
   agentsRunning: 0,
   toolSeq: 0,
   closePending: false,
+  lastSecond: 0,
   ticker: null as Timer | null,
   slow: null as Timer | null,
 }
@@ -177,8 +181,6 @@ const rt = {
 const isAnimated = (): boolean => rt.settings.animation && !rt.isReduced
 
 // ── 小工具 ────────────────────────────────────────────────────
-const clamp = (v: number, lo: number, hi: number): number => Math.max(lo, Math.min(hi, v))
-
 const hex = (n: number): string => Math.round(n).toString(16).padStart(2, '0')
 const css = ([r, g, b]: Rgb): string => `#${hex(r)}${hex(g)}${hex(b)}`
 const mix = (a: Rgb, b: Rgb, t: number): Rgb => [
@@ -229,13 +231,6 @@ const ago = (at: number, now: number): string => {
   if (m < 60) return `${m}m 前`
   const h = Math.floor(m / 60)
   return h < 24 ? `${h}h 前` : `${Math.floor(h / 24)}d 前`
-}
-
-const WIDE = /[ᄀ-ᅟ⺀-꓏가-힣豈-﫿︰-﹏＀-｠￠-￦]|[\u2699]|\p{Emoji_Presentation}/u
-const cellWidth = (s: string): number => {
-  let w = 0
-  for (const ch of s) w += WIDE.test(ch) ? 2 : 1
-  return w
 }
 
 const shortModel = (model: string): string => model.replace(/^claude-/, '')
@@ -604,9 +599,8 @@ const applyBurn = async (
 const refreshFleet = async ($: EngineInterface): Promise<{ running: number; fresh: string[] }> => {
   const list = await $.agent.list()
   const now = await $.clock.now()
-  let running = 0
   let fresh: string[] = []
-  const updated = await update($, fleet, f => {
+  const merge = (f: AgentActivity[] | null): AgentActivity[] => {
     const cur = f ?? []
     const byId = new Map(cur.map(a => [a.id, a] as const))
     let hue = cur.reduce((m, a) => Math.max(m, a.hue + 1), 0)
@@ -654,15 +648,20 @@ const refreshFleet = async ($: EngineInterface): Promise<{ running: number; fres
       .filter(a => a.endedAt !== null)
       .sort((x, y) => (y.endedAt ?? 0) - (x.endedAt ?? 0))
       .slice(0, DONE_KEEP)
-    running = live.length
     return [...live, ...done]
-  })
-  const live = (updated ?? []).filter(a => a.endedAt === null)
-  await update($, agents, () => ({
+  }
+  // 约每秒查一次；没变化就不写，写了读者就得重画（桌面端每次重画都会闪一下）
+  const cur = await read($, fleet)
+  const merged = merge(cur)
+  const updated = (cur !== null && JSON.stringify(merged) === JSON.stringify(cur) ? cur : await update($, fleet, merge)) ?? []
+  const live = updated.filter(a => a.endedAt === null)
+  const summary: Agents = {
     running: live.length,
+    known: updated.length,
     items: live.slice(0, 5).map(a => ({ id: a.id, label: a.label, type: a.type })),
-  }))
-  return { running, fresh }
+  }
+  if (JSON.stringify(await read($, agents)) !== JSON.stringify(summary)) await update($, agents, () => summary)
+  return { running: live.length, fresh }
 }
 
 const openPanel = async ($: EngineInterface): Promise<void> => {
@@ -773,6 +772,12 @@ const tickFrame = async ($: EngineInterface): Promise<void> => {
       await learnEstimate($)
     }
     const isIdle = await step($, isAnimated())
+    // 桌面端侧栏的计时按秒走（它不跟动画帧）；秒数变了才写
+    const sec = Math.floor((await $.clock.now()) / 1000)
+    if (sec !== rt.lastSecond) {
+      rt.lastSecond = sec
+      await update($, second, () => sec)
+    }
     // 子代理列表约每秒查一次；要停帧前再确认一次
     const every = isAnimated() ? 8 : 1
     if (!rt.isDemo && (isIdle || rt.frameNo % every === 0)) await onFleetChange($, await refreshFleet($))
@@ -1090,7 +1095,10 @@ export const register: Register = (on, options) => {
     const fl = (await read($, fleet)) ?? []
     const log = (await read($, toolLog)) ?? []
     const counts = (await read($, toolCounts)) ?? {}
-    const a = await read($, anim)
+    // 桌面端不跟动画帧重画（会频闪）：波浪自己用 SMIL 动；计时只在有东西在跑时按秒走
+    const isDesktop = e.surface !== 'terminal'
+    const a = isDesktop ? null : await read($, anim)
+    if (isDesktop && (fl.some(x => x.endedAt === null) || log.some(x => x.endedAt === null))) await read($, second)
     const pal = (await read($, isLight)) ? LIGHT : DARK
     const isSmooth = rt.settings.animation && !(await read($, isReducedMotion))
     await read($, minute)
@@ -1100,6 +1108,7 @@ export const register: Register = (on, options) => {
     const isInline = e.props.placement === 'inline'
     const frame = a?.frame ?? 0
     const t = isSmooth ? frame * 0.32 : 0
+    const spins = isSmooth && !isDesktop
 
     const hueOf = (i: number): Rgb => pal.hues[i % pal.hues.length]!
     const paint = (cells: Cell[]) =>
@@ -1112,7 +1121,7 @@ export const register: Register = (on, options) => {
     const ownerOf = (id: string | null) => (id === null ? null : byId.get(id) ?? null)
     const statusIcon = (x: AgentActivity, i: number) =>
       x.endedAt === null
-        ? isSmooth
+        ? spins
           ? SPIN[(frame + i * 3) % SPIN.length]!
           : '✻'
         : x.status === 'failed'
@@ -1132,6 +1141,75 @@ export const register: Register = (on, options) => {
         cur = cur.parentId ? byId.get(cur.parentId) : undefined
       }
       return d
+    }
+
+    // 桌面端 / VS Code / 手机：比例字体，波浪等用 Svg 画（hooks/desktop.tsx）
+    if (e.surface !== 'terminal') {
+      const rows = e.viewport?.rows ?? 40
+      const agentRows = live.length * 7 + Math.min(done.length, 4) + 4
+      const toolRows = clamp(rows - agentRows - 6, 3, 10)
+      const view: PaneView = {
+        width: W,
+        isInline,
+        isAnimated: isSmooth,
+        now,
+        running: live.length,
+        done: done.length,
+        agents: live.map((x, i) => ({
+          id: x.id,
+          type: x.type,
+          label: x.label,
+          icon: statusIcon(x, i),
+          tint: agentTint(x.hue),
+          elapsed: mmss(now - x.startedAt),
+          depth: depthOf(x),
+          energy: energyOf(x, now),
+          seed: x.hue * 1.7,
+          stats: `🔧 ${x.tools} · ${fmt(x.tokens)}`,
+          activity:
+            x.currentTool !== null
+              ? `▸ ${x.currentTool}`
+              : now - x.lastActivity > 20_000
+                ? `静默 ${span(now - x.lastActivity)}`
+                : '思考中',
+          isToolRunning: x.currentTool !== null,
+          tools: x.tools,
+        })),
+        finished: done.slice(0, 4).map((x, i) => ({
+          id: x.id,
+          icon: statusIcon(x, i),
+          tint: agentTint(x.hue),
+          isFailed: x.status === 'failed',
+          text: `${x.type} · ${x.label}`,
+          tail: `${mmss((x.endedAt ?? now) - x.startedAt)} · 🔧${x.tools}`,
+        })),
+        tools: log
+          .slice(-toolRows)
+          .reverse()
+          .map(ev => {
+            const owner = ownerOf(ev.owner)
+            const isRunning = ev.endedAt === null
+            return {
+              seq: ev.seq,
+              icon: isRunning ? '✻' : ev.isError ? '✗' : '✓',
+              isRunning,
+              isError: ev.isError,
+              tool: ev.tool,
+              owner: owner ? owner.type : ev.owner === null ? '主对话' : '子代理',
+              ownerTint: owner ? agentTint(owner.hue) : null,
+              time: isRunning ? span(now - ev.startedAt) : ev.isError ? '失败' : span((ev.endedAt ?? now) - ev.startedAt),
+            }
+          }),
+        counts:
+          Object.keys(counts).length > 0
+            ? Object.entries(counts)
+                .sort((x, y) => y[1] - x[1])
+                .slice(0, 6)
+                .map(([k, v]) => `${k} ${v}`)
+                .join(' · ')
+            : null,
+      }
+      return desktopPane($.ui.resolve(e), view, { collapse: () => closePanel($) })
     }
 
     // 右上角留两格给引擎自己的关闭标记 ×，读起来是「收起 ×」
@@ -1267,12 +1345,14 @@ export const register: Register = (on, options) => {
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     if (e.props.hasSurvey) return next(e)
+    // 桌面端不跟动画帧（每 120ms 一次）重画：比例字体每次重排都会闪。只在数据真变了时重画
+    const isDesktop = e.surface !== 'terminal'
 
     const m = await read($, meter)
     const t = await read($, totals)
     const l = await read($, last)
     const r = await read($, run)
-    const a = await read($, anim)
+    const a = isDesktop ? null : await read($, anim)
     const hist = await read($, history)
     const cp = await read($, compact)
     const bn = await read($, burn)
@@ -1315,45 +1395,143 @@ export const register: Register = (on, options) => {
     const shownHit = a?.hit ?? hit ?? 0
     const cum = t ? t.input + t.output + t.cacheRead + t.cacheWrite : 0
     const limits = m?.limits ?? []
-    const spin = isSmooth ? SPIN[frame % SPIN.length] : '✻'
+    const spin = isSmooth && !isDesktop ? SPIN[frame % SPIN.length] : '✻'
 
     // ── 标题 / 紧凑行左侧：状态 + 工具 + 后台
-    const statusText = isWorking ? `${spin} 生成中 ${r ? mmss(now - r.startedAt) : ''}` : l ? `✓ ${l.seconds}s` : '◇ 就绪'
+    // 桌面端不走秒表：计时要每秒重画一次，桌面 App 自己也显示着生成时长
+    const statusIcon = isWorking ? spin! : l ? '✓' : '◇'
+    const statusWords = isWorking
+      ? `生成中 ${r && !isDesktop ? mmss(now - r.startedAt) : ''}`.trimEnd()
+      : l
+        ? `${l.seconds}s`
+        : '就绪'
+    const statusText = `${statusIcon} ${statusWords}`
     const toolsNow = isWorking ? (r?.tools ?? 0) : (l?.tools ?? 0)
     const toolsText = toolsNow > 0 ? `  🔧 ${toolsNow}` : ''
-    const fl = await read($, fleet)
+    // 子代理每调一次工具 fleet 就变一次；桌面端只用 agents（运行数变了才写）
+    const fl = isDesktop ? null : await read($, fleet)
     const runningN = (fl ?? []).filter(x => x.endedAt === null).length || (ag?.running ?? 0)
-    const hasAgents = (fl?.length ?? 0) > 0 || runningN > 0
+    const hasAgents = (fl?.length ?? ag?.known ?? 0) > 0 || runningN > 0
+    const metaParts = [
+      t ? `Σ ${fmt(cum)}` : null,
+      t ? `${t.turns} 轮` : null,
+      m && m.costUsd !== null && m.costUsd > 0 ? `$${m.costUsd.toFixed(2)}` : null,
+      l ? shortModel(l.model) : null,
+    ].filter((x): x is string => x !== null)
+    const onAgents = async () => {
+      if ((await read($, panel))?.isOpen) await closePanel($)
+      else await openPanel($)
+    }
+    const onToggle = async () => {
+      const isNowOpen = await update($, isExpanded, v => !v)
+      if (isNowOpen) await refreshBreakdown($, rt.isDemo)
+    }
+
+    // ── 桌面端：比例字体，不拼字符，另一套布局（hooks/desktop.tsx）
+    if (e.surface === 'desktop') {
+      const trendN = rt.settings.trend
+      const ctxSeries = hist?.ctx ?? []
+      const tiles: Tile[] = [
+        {
+          key: 'ctx',
+          label: '上下文',
+          short: '上下文',
+          value: pct === null ? '—' : `${approx}${Math.round(shownCtx)}%`,
+          tone: pct === null ? null : pct >= CTX_LEVELS[1]! ? 'danger' : pct >= CTX_LEVELS[0]! ? 'warn' : null,
+          fill: pct === null ? 0 : shownCtx,
+          tint: TINT.ctx,
+          marker: m && compactAt !== null && m.window > 0 ? (compactAt / m.window) * 100 : null,
+          caption: pct === null || tokens === null || !m ? '等待首个响应' : `${approx}${fmt(tokens)} / ${fmt(m.window)}`,
+          note: null,
+          trend:
+            trendN > 0
+              ? { values: ctxSeries, slots: trendN, max: Math.max(25, ...ctxSeries.slice(-trendN)), marks: hist?.marks ?? [] }
+              : null,
+        },
+        {
+          key: 'hit',
+          label: '缓存命中',
+          short: '缓存',
+          value: hit === null ? '—' : `${Math.round(shownHit)}%`,
+          tone: hit !== null && hit < 50 ? 'warn' : null,
+          fill: hit === null ? 0 : shownHit,
+          tint: TINT.hit,
+          marker: null,
+          caption: l && l.hit !== null && l.hit !== undefined ? `上轮 ${Math.round(l.hit)}%` : '',
+          note: null,
+          trend: trendN > 0 ? { values: hist?.hit ?? [], slots: trendN, max: 100, marks: [] } : null,
+        },
+        ...limits.map((lim): Tile => {
+          const reset = until(lim.resetsAt, now)
+          const tone: Tone = lim.percentUsed >= LIMIT_LEVELS[1]! ? 'danger' : lim.percentUsed >= 80 ? 'warn' : null
+          return {
+            key: `limit-${lim.kind}`,
+            label: lim.kind in LIMIT_LABEL && lim.kind !== 'spend_limit' ? `${limitLabel(lim.kind)} 额度` : limitLabel(lim.kind),
+            short: limitLabel(lim.kind),
+            value: `${lim.percentUsed}%`,
+            tone,
+            fill: lim.percentUsed,
+            tint: TINT.limit,
+            marker: null,
+            caption: reset ? `${reset} 后重置` : '',
+            note: reset ? `↻${reset}` : null,
+            trend: null,
+          }
+        }),
+      ]
+      const usedRows = bd ? bd.rows.filter(x => x.kind === 'used') : []
+      const used = usedRows.reduce((s, x) => s + x.tokens, 0)
+      const view: BandView = {
+        width: W,
+        isWorking,
+        isCompact: isCompactView,
+        isOpen,
+        status: { icon: statusIcon, text: statusWords },
+        tools: toolsNow,
+        agents: hasAgents ? runningN : null,
+        meta: metaParts,
+        total: t ? fmt(cum) : null,
+        tiles,
+        detail: isOpen
+          ? {
+              breakdown: bd
+                ? {
+                    summary:
+                      `已用 ${fmt(used)} / ${fmt(bd.max)}` + (bd.autoCompactAt !== null ? ` · 压缩阈值 ${fmt(bd.autoCompactAt)}` : ''),
+                    rows: usedRows.map((row, i) => ({
+                      label: CATEGORY_LABEL[row.name] ?? row.name,
+                      amount: fmt(row.tokens),
+                      share: used > 0 ? (row.tokens / used) * 100 : 0,
+                      tint: categoryTint(row.name, i),
+                    })),
+                  }
+                : null,
+              burn: limits.flatMap(lim => {
+                const per = bn?.[lim.kind]
+                if (per === undefined) return []
+                const turnsLeft = per >= 0.05 ? Math.floor((100 - lim.percentUsed) / per) : null
+                return [{ label: limitLabel(lim.kind), per: `+${per.toFixed(1)}%`, left: turnsLeft !== null ? `约 ${turnsLeft} 轮用完` : null }]
+              }),
+              lastCompact: lc
+                ? `${fmt(lc.before)} → ${fmt(lc.after)} · ${ago(lc.at, now)} · ${lc.trigger === 'auto' ? '自动' : '手动'}`
+                : null,
+              tasks: (ag?.items ?? []).map(it => `${it.type} · ${it.label}`),
+            }
+          : null,
+      }
+      return desktopBand($.ui.resolve(e), view, { toggle: onToggle, agents: onAgents })
+    }
+
     const agentsLabel = `⚙ ${runningN}`
     // 按钮本身 + 后面一个空格
     const agentsW = hasAgents ? cellWidth(agentsLabel) + 1 : 0
     const agentsBtn = hasAgents ? (
-      <Button
-        key="agents"
-        plain
-        dimColor={runningN === 0}
-        label={agentsLabel}
-        onPress={async () => {
-          if ((await read($, panel))?.isOpen) await closePanel($)
-          else await openPanel($)
-        }}
-      />
+      <Button key="agents" plain dimColor={runningN === 0} label={agentsLabel} onPress={onAgents} />
     ) : null
     const left = ` ${statusText}${toolsText}${hasAgents ? ' ' : ''} `
     const leftColor = isWorking ? pal.accent : undefined
 
-    const toggle = (
-      <Button
-        key="toggle"
-        dimColor
-        plain
-        label={isOpen ? '▴' : '▾'}
-        onPress={async () => {
-          const isNowOpen = await update($, isExpanded, v => !v)
-          if (isNowOpen) await refreshBreakdown($, rt.isDemo)
-        }}
-      />
-    )
+    const toggle = <Button key="toggle" dimColor plain label={isOpen ? '▴' : '▾'} onPress={onToggle} />
 
     // ── 明细（▾ 展开）：额度消耗、上次压缩、后台任务、/context 分类
     const detail = isOpen ? (
@@ -1517,12 +1695,6 @@ export const register: Register = (on, options) => {
         </Text>
       )
     }
-    const metaParts = [
-      t ? `Σ ${fmt(cum)}` : null,
-      t ? `${t.turns} 轮` : null,
-      m && m.costUsd !== null && m.costUsd > 0 ? `$${m.costUsd.toFixed(2)}` : null,
-      l ? shortModel(l.model) : null,
-    ].filter((x): x is string => x !== null)
     const meta = metaParts.length > 0 ? ` ${metaParts.join(' · ')} ` : ' '
     const rule = Math.max(2, W - 1 - cellWidth(left) - agentsW - cellWidth(meta) - 4)
     const marker =

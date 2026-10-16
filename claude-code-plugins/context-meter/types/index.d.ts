@@ -67,6 +67,8 @@ export type LastCompact = { before: number; after: number; at: number; trigger: 
 /** 正在运行的子代理 / 后台任务。 */
 export type Agents = {
   running: number
+  /** 侧栏里记着的子代理数（运行中 + 最近结束的）；旧快照里没有 */
+  known?: number
   items: { id: string; label: string; type: string }[]
 }
 
@@ -154,6 +156,8 @@ declare module 'claude-code' {
       alerts: Alerts | null
       /** 每分钟 +1，驱动重置倒计时重绘 */
       minute: number
+      /** 当前秒（epoch 秒），只在动画帧在跑时更新；桌面端侧栏的计时读它，不跟每帧重画 */
+      second: number
       isExpanded: boolean
       breakdown: Breakdown | null
       compact: Compact | null
